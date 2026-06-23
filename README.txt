@@ -1,0 +1,315 @@
+$ python3
+Python 3.12.3 (main, Mar 23 2026, 19:04:32) [GCC 13.3.0] on linux
+Type "help", "copyright", "credits" or "license" for more information.
+>>> from cp import *
+
+>>> # parsers for terminals (fixed strings)
+>>> p = Parser("123")
+>>> p
+term('123')@<stdin>:1
+>>> import re
+
+>>> # parsers for regexps
+>>> r = Parser(re.compile("[ab]+"))
+>>> r
+regexp('[ab]+')@<stdin>:1
+
+>>> # new parsers are generates by operations/combinators
+
+>>> # choice: OR
+>>> q = p | r
+>>> q
+(term('123')|regexp('[ab]+'))@<stdin>:1
+>>> q("123")
+'123' ('(term('123')|regexp('[ab]+'))'@'123'@[0:3])
+>>> q("aaabbb")
+'aaabbb' ('(term('123')|regexp('[ab]+'))'@'aaabbb'@[0:6])
+
+>>> # sequence of parsers by concatenation
+>>> q = p & r
+>>> q
+(term('123')&regexp('[ab]+'))@<stdin>:1
+>>> q("123aabb")
+['123', 'aabb'] ('(term('123')&regexp('[ab]+'))'@'123aabb'@[0:7])
+>>> q &= p
+>>> q("123aabb123")
+['123', 'aabb', '123'] ('(term('123')&regexp('[ab]+')&term('123'))'@'123aabb123'@[0:10])
+>>> # attention! operations OR and AND leave resulting parser opened, i.e.
+>>> q = p & r
+>>> q
+(term('123')&regexp('[ab]+'))@<stdin>:1
+>>> q = q & q
+>>> q
+(term('123')&regexp('[ab]+')&(term('123')&regexp('[ab]+')))@<stdin>:1
+>>> # note, that resulting parser is not (p&r) & (p&r)
+>>> # but p & r & (p&r)
+>>> # i.e. result will be ['123', 'ab', ['123', 'ab']]
+>>> # and it may be somewhat unexpected
+>>> # if you want to get [[..],[..]], then first parser in AND/OR 
+>>> # expression should be closed.
+>>> # closed parser means that parser cannot be extended anymore
+>>> # parser considered closed, when it has attached processing/checking
+>>> # functions, or it can be closed explicitly
+>>> q = p&r
+>>> q = q()
+>>> q = q & q
+>>> q
+(∎(term('123')&regexp('[ab]+'))&∎(term('123')&regexp('[ab]+')))@<stdin>:1
+>>> # note these small rectangles
+>>> # now parser is in (() & ()) form
+
+>>> # NEG operator: parse but skip result
+>>> # it makes sense only with AND operator
+>>> q = -p & r
+>>> q("123aabb")
+['aabb'] ('((-(term('123')))&regexp('[ab]+'))'@'123aabb'@[0:7])
+
+>>> # optional operator: if parser fails then assume just skipping result
+>>> q = ~p & r
+>>> q("123aabb")
+['123', 'aabb'] ('(~(term('123'))&regexp('[ab]+'))'@'123aabb'@[0:7])
+>>> q("aabb")
+['aabb'] ('(~(term('123'))&regexp('[ab]+'))'@'aabb'@[0:4])
+
+>>> # default value on parser failure
+>>> q = (p / '567') & r
+>>> q
+(((term('123'))/567)&regexp('[ab]+'))@<stdin>:1
+>>> q("123aabb")
+['123', 'aabb'] ('(((term('123'))/567)&regexp('[ab]+'))'@'123aabb'@[0:7])
+>>> q("aabb")
+['567', 'aabb'] ('(((term('123'))/567)&regexp('[ab]+'))'@'aabb'@[0:4])
+
+>>> # parse, and on success change value of result
+>>> q = (p == '321') & r
+>>> q
+(((term('123'))==321)&regexp('[ab]+'))@<stdin>:1
+>>> q("123aaa")
+['321', 'aaa'] ('(((term('123'))==321)&regexp('[ab]+'))'@'123aaa'@[0:6])
+
+>>> # A >> B, execute A and on success, return result of B parser
+>>> q = p >> r
+>>> q
+(term('123')>>regexp('[ab]+'))@<stdin>:1
+>>> q("123bbb")
+'bbb' ('(term('123')>>regexp('[ab]+'))'@'123bbb'@[0:6])
+>>> q = p >> p >> r
+>>> q
+((term('123')>>term('123'))>>regexp('[ab]+'))@<stdin>:1
+>>> q("123123bb")
+'bb' ('((term('123')>>term('123'))>>regexp('[ab]+'))'@'123123bb'@[0:8])
+>>> # Note difference with SKIP operation:
+>>> q = (-p) & (-p) & r
+>>> q("123123bb")
+['bb'] ('((-(term('123')))&(-(term('123')))&regexp('[ab]+'))'@'123123bb'@[0:8])
+
+>>> # operation << is mirror version of >>
+>>> q = r << p << p
+>>> q
+((regexp('[ab]+')<<term('123'))<<term('123'))@<stdin>:1
+>>> q("aabb123123")
+'aabb' ('((regexp('[ab]+')<<term('123'))<<term('123'))'@'aabb123123'@[0:10])
+
+>>> # give a name to parser (used in various diagnostic outputs, see below)
+>>> q=q['Q']
+>>> q
+Q@<stdin>:1
+>>> # each operation creates a new parser, so:
+>>> w=q['W']
+>>> w
+W@<stdin>:1
+>>> q
+Q@<stdin>:1
+
+>>> # make a parser for list of items
+>>> q = +p
+>>> q
++(term('123'))@<stdin>:1
+>>> q('123123123123')
+['123', '123', '123', '123'] ('+(term('123'))'@'123123123123'@[0:12])
+>>> # list of items cannot be empty
+>>> # if you need to parse also empty lists, then use:
+>>> q = +p / []
+>>> q
+((+(term('123')))/[])@<stdin>:1
+>>> q('')
+[] ('((+(term('123')))/[])'@''@[0:0])
+>>> q('zxc')
+[] ('((+(term('123')))/[])'@''@[0:0])
+
+>>> # Attach a checker to parser
+>>> q = p // (lambda v: v == 123)
+>>> q
+term('123')//<lambda>@<stdin>:1@<stdin>:1
+>>> q("123")
+<INVALID>
+Check '<lambda>@<stdin>:1' failed on value '123'
+Token: ... 123 ...
+Stream:
+Parsing backtrase
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+input ⮞ 123🢂◈
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┯━━━━━━━━━━━━━┯━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+parser                         │ defined at  │ parser input
+═══════════════════════════════╪═════════════╪═══════════════════════════════════════════════════════════════════════════
+term('123')// .. da>@<stdin>:1 │ <stdin>:1   │ 🢂◈123
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┷━━━━━━━━━━━━━┷━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Parsing log
+━━━━━━┯━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┯━━━━━━━━━━━━━┯━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+depth │ parser                         │ defined at  │ parser input
+══════╪════════════════════════════════╪═════════════╪═══════════════════════════════════════════════════════════════════
+0     │ term('123')// .. da>@<stdin>:1 │ <stdin>:1   │ 🢂◈123
+━━━━━━┷━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┷━━━━━━━━━━━━━┷━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+>>> # You can give a name to checks and result processors
+>>> q = p // ((lambda v: v == 123), 'Check: equal to integer 123')
+>>> q("123")
+<INVALID>
+Check 'Check: equal to integer 123' failed on value '123'
+Token: ... 123 ...
+Stream:
+Parsing backtrase
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+input ⮞ 123🢂◈
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┯━━━━━━━━━━━━━┯━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+parser                         │ defined at  │ parser input
+═══════════════════════════════╪═════════════╪═══════════════════════════════════════════════════════════════════════════
+term('123')// .. o integer 123 │ <stdin>:1   │ 🢂◈123
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┷━━━━━━━━━━━━━┷━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Parsing log
+━━━━━━┯━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┯━━━━━━━━━━━━━┯━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+depth │ parser                         │ defined at  │ parser input
+══════╪════════════════════════════════╪═════════════╪═══════════════════════════════════════════════════════════════════
+0     │ term('123')// .. o integer 123 │ <stdin>:1   │ 🢂◈123
+━━━━━━┷━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┷━━━━━━━━━━━━━┷━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+>>> q = p % int // ((lambda v: v == 123), 'Check: equal to integer 123')
+>>> q("123")
+123 ('term('123')%int//Check: equal to integer 123'@'123'@[0:3])
+
+>>> # recursive parsers
+>>> # callable w/o arguments is treated as special case
+>>> # of wrapped parser
+>>> # It is unwrapped during processing input stream
+>>>
+>>> p = term("1") & ~Parser(lambda:p)
+>>> p
+(term('1')&~(<lambda>@<stdin>:1))@<stdin>:1
+>>> p("1")
+['1'] ('(term('1')&~(<lambda>@<stdin>:1))'@'1'@[0:1])
+>>> p("111")
+['1', ['1', ['1']]] ('(term('1')&~(<lambda>@<stdin>:1))'@'111'@[0:3])
+>>> p("111111")
+['1', ['1', ['1', ['1', ['1', ['1']]]]]] ('(term('1')&~(<lambda>@<stdin>:1))'@'111111'@[0:6])
+>>> p = term("1") & Parser(lambda:p)
+>>> p("1")
+<INVALID>
+Parsing backtrase
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+input ⮞ 🢂◈1
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┯━━━━━━━━━━━━━━━━━━━━━━┯━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+parser                         │ defined at           │ parser input
+═══════════════════════════════╪══════════════════════╪══════════════════════════════════════════════════════════════════
+(term('1')&<lambda>@<stdin>:1) │ <stdin>:1            │ 🢂◈1
+<lambda>@<stdin>:1             │ <stdin>:1            │ 1🢂◈
+(term('1')&<lambda>@<stdin>:1) │ <stdin>:1            │ 1🢂◈
+term('1')                      │  ...m/cp/utils.py:10 │ 1🢂◈
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┷━━━━━━━━━━━━━━━━━━━━━━┷━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Parsing log
+━━━━━━┯━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┯━━━━━━━━━━━━━━━━━━━━━━┯━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+depth │ parser                         │ defined at           │ parser input
+══════╪════════════════════════════════╪══════════════════════╪══════════════════════════════════════════════════════════
+0     │ (term('1')&<lambda>@<stdin>:1) │ <stdin>:1            │ 🢂◈1
+1     │ term('1')                      │  ...m/cp/utils.py:10 │ 🢂◈1
+1     │ <lambda>@<stdin>:1             │ <stdin>:1            │ 1🢂◈
+2     │ (term('1')&<lambda>@<stdin>:1) │ <stdin>:1            │ 1🢂◈
+3     │ term('1')                      │  ...m/cp/utils.py:10 │ 1🢂◈
+━━━━━━┷━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┷━━━━━━━━━━━━━━━━━━━━━━┷━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+>>> # it is so, because p expects infinite input of '1'
+>>> # termination may be achieved by making p optional
+>>> # but before first call on a stream
+>>> p = ~p
+>>> p("1")
+None ('~((term('1')&<lambda>@<stdin>:1))'@''@[0:0])
+>>> p("1111")
+None ('~((term('1')&<lambda>@<stdin>:1))'@''@[0:0])
+>>> # notice the difference
+>>> del p
+>>> p = term("1") & Parser(lambda:p)
+>>> p = ~p # !NB
+>>> p("1111")
+['1', ['1', ['1', ['1']]]] ('~((term('1')&<lambda>@<stdin>:1))'@'1111'@[0:4])
+>>> # lambdas are unwrapped once on first parsing of a stream
+>>> # then result of unwrapping is stored internally in parser
+>>> # may be in future this behavior will be changed: lambdas will
+>>> # be unwrapped every time on parsing
+
+>>> # recursion also works with namedtuples
+>>> bp=(intnum | in_brackets(Parser(bintree(left=lambda:bp, right=lambda:bp))))
+>>> bp("1")
+1 ('(intnum|'('bintree(left=<lambda>@<stdin>:1@<stdin>:1, right=<lambda>@<stdin>:1@<stdin>:1)')')'@'1'@[0:1])
+>>> bp("(1 2)")
+bintree(left=1, right=2) ('(intnum|'('bintree(left=<lambda>@<stdin>:1@<stdin>:1, right=<lambda>@<stdin>:1@<stdin>:1)')')'@'(1 2)'@[0:5])
+>>> bp("(1 (2 3))")
+bintree(left=1, right=bintree(left=2, right=3)) ('(intnum|'('bintree(left=<lambda>@<stdin>:1@<stdin>:1, right=<lambda>@<stdin>:1@<stdin>:1)')')'@'(1 (2 3))'@[0:9])
+>>> r = bp("(1 ((2 4) 3))")
+>>> r.value
+bintree(left=1, right=bintree(left=bintree(left=2, right=4), right=3))
+
+>>> # Parser will tread any object with __parser field as parser
+>>> # and calls this object with the result of parsing on success
+>>> class A:
+...   __parser = term("!") >> intnum
+...   def __init__(self, i):
+...     self.i = i
+...
+>>> ap = Parser(A)
+>>> ap
+<class '__main__.A'>@<stdin>:1
+>>> ap("!123")
+<__main__.A object at 0x707f46e68e60> ('<class '__main__.A'>'@'!123'@[0:4])
+>>> r = ap("!123")
+>>> r.value.i
+123
+>>> apl = +ap
+>>> r = apl("!1 !2 !3")
+>>> r.value
+[<__main__.A object at 0x707f46e68650>, <__main__.A object at 0x707f46e69130>, <__main__.A object at 0x707f46e690d0>]
+>>> r.value[0].i
+1
+>>> r.value[1].i
+2
+>>> r.value[2].i
+3
+
+>>> # Recursion works with classes too
+>>> class BT:
+...   __parser = intnum | in_brackets(Parser(lambda:BT) & (-term(",")) & Parser(lambda:BT))
+...   def __init__(self, val):
+...     if isinstance(val, int):
+...       self.leaf = val
+...     else:
+...       self.left = val[0]
+...       self.right = val[1]
+...   def __repr__(self):
+...     leaf = getattr(self, 'leaf', None)
+...     if leaf:
+...       return repr(leaf)
+...     return f"(left={repr(self.left)}, right={repr(self.right)})"
+...
+>>> btp = Parser(BT)
+>>> btp("1")
+1 ('<class '__main__.BT'>'@'1'@[0:1])
+>>> btp("(1, 2)")
+(left=1, right=2) ('<class '__main__.BT'>'@'(1, 2)'@[0:6])
+>>> btp("(1, (2,3))")
+(left=1, right=(left=2, right=3)) ('<class '__main__.BT'>'@'(1, (2,3))'@[0:10])
+
+
+# TODO: dicts, sum, decorators parser, parser_gen, debugging of parsers
