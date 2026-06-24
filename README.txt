@@ -311,5 +311,67 @@ bintree(left=1, right=bintree(left=bintree(left=2, right=4), right=3))
 >>> btp("(1, (2,3))")
 (left=1, right=(left=2, right=3)) ('<class '__main__.BT'>'@'(1, (2,3))'@[0:10])
 
+>>> # DICTs
+>>> # dict parser parses stream until all parsers in dict fail
+>>> # each succesful value is added to corresponding list for
+>>> # corresponding key
+>>> p = Parser({'a':identifier, 'b':intnum})
+>>> p("abc 123 qwe 345 zxc")
+{'a': ['abc', 'qwe', 'zxc'], 'b': [123, 345]} ('{'a': identifier@/home/vasil/Hobby/Soft/python/cp/cp/utils.py:39, 'b': intnum@/home/vasil/Hobby/Soft/python/cp/cp/utils.py:50}'@'abc 123 qwe 345 zxc'@[0:19])
+>>> # if we want exact dict (one value for one key) then
+>>> # we may add checks and processors
+>>> check_exact_dict=lambda d: all(len(v) == 1 for v in d.values())
+>>> p = p // (check_exact_dict, 'exact_dict')
+>>> p("1 a")
+{'a': ['a'], 'b': [1]} ('{'a': identifier@/home/vasil/Hobby/Soft/python/cp/cp/utils.py:39, 'b': intnum@/home/vasil/Hobby/Soft/python/cp/cp/utils.py:50}//exact_dict'@'1 a'@[0:3])
+>>> p("1 a a")
+<INVALID>
+Check 'exact_dict' failed on value {'a': ['a', 'a'], 'b': [1]}
+Token: ... 1 a a ...
+Stream:
+Parsing backtrase
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+input ⮞ 1 a a🢂◈
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┯━━━━━━━━━━━━━━━━━━━━━┯━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+parser                         │ defined at          │ parser input
+═══════════════════════════════╪═════════════════════╪═══════════════════════════════════════════════════════════════════
+{'a': identif .. }//exact_dict │ <python-input-7>:1  │ 🢂◈1 a a
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┷━━━━━━━━━━━━━━━━━━━━━┷━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+...
+>>> # values in exact dicts may be unwrapped from lists
+>>> dict_unwrap = (lambda d: {k:v[0] for k,v in d.items()}, 'dict_unwrap')
+>>> p = p % dict_unwrap
+>>> p("1 a")
+{'a': 'a', 'b': 1} ('{'a': identifier@/home/vasil/Hobby/Soft/python/cp/cp/utils.py:39, 'b': intnum@/home/vasil/Hobby/Soft/python/cp/cp/utils.py:50}//exact_dict%dict_unwrap'@'1 a'@[0:3])
+>>> # dict parsers can be added to each other
+>>> # keys are merged 
+>>> q = Parser({'c':string, 'd':identifier})
+>>> p = Parser({'a':in_brackets(term('a')), 'b':intnum})
+>>> w = q + p
+>>> w('123 qwe (a) (a) 345 "str" 2 ')
+{'c': ['str'], 'd': ['qwe'], 'a': ['a', 'a'], 'b': [123, 345, 2]} ('({'c': string@/home/vasil/Hobby/Soft/python/cp/cp/utils.py:37, 'd': identifier@/home/vasil/Hobby/Soft/python/cp/cp/utils.py:39})+({'a': '('term('a')')'@/home/vasil/Hobby/Soft/python/cp/cp/utils.py:32, 'b': intnum@/home/vasil/Hobby/Soft/python/cp/cp/utils.py:50})'@'123 qwe (a) (a) 345 "str" 2 '@[0:28])
+>>> # note: dicts are processed in order of iteration over keys
+>>> # so, be careful with shadowing one parser by another
+>>> q = Parser({'a':identifier, 'b':term('a')})
+>>> q("a qwe aaa")
+{'a': ['a', 'qwe', 'aaa'], 'b': []} ('{'a': identifier@/home/vasil/Hobby/Soft/python/cp/cp/utils.py:39, 'b': term('a')@/home/vasil/Hobby/Soft/python/cp/cp/utils.py:10}'@'a qwe aaa'@[0:9])
+>>> p = intnum | in_brackets(Parser({'l':lambda:term('l')>>p, 'r':lambda:term('r')>>p}))
+>>> p("1")
+1 ('(intnum|'('{'l': <lambda>@<python-input-29>:1@<python-input-29>:1, 'r': <lambda>@<python-input-29>:1@<python-input-29>:1}')')'@'1'@[0:1])
+>>> p("(r1 l2)")
+{'l': [2], 'r': [1]} ('(intnum|'('{'l': <lambda>@<python-input-29>:1@<python-input-29>:1, 'r': <lambda>@<python-input-29>:1@<python-input-29>:1}')')'@'(r1 l2)'@[0:7])
+>>> p("(r1 l(r2 l(l(l3))))")
+{'l': [{'l': [{'l': [{'l': [3], 'r': []}], 'r': []}], 'r': [2]}], 'r': [1]} ('(intnum|'('{'l': <lambda>@<python-input-29>:1@<python-input-29>:1, 'r': <lambda>@<python-input-29>:1@<python-input-29>:1}')')'@'(r1 l(r2 l(l(l3))))'@[0:19])
+>>> # unwrapping dict values
+>>> p = intnum | in_brackets(Parser({'l':lambda:term('l')>>p, 'r':lambda:term('r')>>p}) % unwrap_dict)
+>>> p("(r1 l(r2 l(l(l3))))")
+{'l': {'l': {'l': {'l': 3, 'r': None}, 'r': None}, 'r': 2}, 'r': 1} ('(intnum|'('{'l': <lambda>@<python-input-1>:1@<python-input-1>:1, 'r': <lambda>@<python-input-1>:1@<python-input-1>:1}%unwrap_dict@/home/vasil/Hobby/Soft/python/cp/cp/utils.py:73')')'@'(r1 l(r2 l(l(l3))))'@[0:19])
+>>> # be careful of using optional parser in dict values,
+>>> # since optional parser always considered as succesful,
+>>> # but mat not do progress on input that may lead to
+>>> # infinite loops
+
+
 
 # TODO: dicts, sum, decorators parser, parser_gen, debugging of parsers
+#       nonces of passing args to class init

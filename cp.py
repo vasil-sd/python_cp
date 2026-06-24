@@ -4,8 +4,27 @@
 # *3. special class for result transformers
 # *4. names for parsers (for diagnostics)
 # *5. backtrace
-#  6. better error reporting:
-#     user-defined parsers and checkers should have ability to return messages
+# *6. better error reporting:
+#      user-defined parsers and checkers should have ability to return messages
+#        result.invalidate(msg) for parsers
+#        user specified names for checkers
+#  6a. breakpoints on stream position ranges and selected parsers
+#      (with parametrizable invocation count)
+#      add to log counting of parsers invocation
+#      think about usage scenarios
+#  6b. limit parsers invocation count in stream object, to avoid
+#      infinite loops, for instance:
+#      +(~p) - may loop forever
+#      Parser({'a':~p}) - may loop forever
+#      p=Parser(lambda:~p)
+#      i.e. every parser that internally contains optional parser (or other
+#      parser that may return success w/o progress on input stream) may
+#      lead to infinite loops
+#      limit in stream object will work with standard parsers, but
+#      user defined parsers may in rare synthetic cases overcome this limit
+#
+#      possible solution: detect succesful parsing w/o stream pos movement in
+#      call_dict. __pos__, etc and return corresponding result
 #  7. user context passing
 #  8. tests!!!
 #  9. docs!!!
@@ -14,7 +33,7 @@
 #      - better naming
 #      - readability!
 #      - move code for diagnostics message and formatting into separate functions
-
+#  11. generating printer combinators from parsers?
 
 from collections import namedtuple
 import inspect
@@ -112,6 +131,10 @@ class Result:
     return self._token
 
   @property
+  def err_msg(self):
+    return self._err_msg
+
+  @property
   def parser_name(self):
     if self._token:
       return self._token.parser_name
@@ -183,13 +206,48 @@ class ResultProcessor(list):
         raise ValueError("Internal error in ResultProcessor")
     return v
 
+class Context(dict):
+  def __init__(self, ctx = None):
+    super().__init__(ctx or dict())
+
+  def push(self):
+    pass
+
+  def pop(self):
+    pass
+
+  @property
+  def toplevel(self):
+    pass
+
+  # __getitem__-> lookup from current to toplevel
+  # __setitem__ -> works only with current frame
+  # ctx['a'] = 22 -> only current frame
+  # a = ctx['a'] -> local then upper
+  # ctx.super['a'] = 22 -> lookup to toplevel
+  # ctx.top['a'] -> only toplevel
+
 class Stream():
-  # TODO: function to get residual
-  def __init__(self, data, bt_enabled = False, log_enabled = False):
+  # TODO: user context
+  #       two types: stack based (like frames during functions calls)
+  #                  parmanent (like globals)
+  #       parsers should have interface for user defined checkers/processors/parsers
+  #       to access context, like:
+  #         check if checker accepts two args, then put context in second
+  #         processor - the same
+  #         user-defined parsers can get access to context via stream object
+  # TODO: function to get residual stream
+  # TODO: think about stream combinators
+  # TODO: add ability to put breakpoint on parser by log/bt
+  #       add line_no to printing log and bt and
+  #       .bp_log(line_no)
+  #       .bp_bt(line_no)
+  def __init__(self, data, context = None, bt_enabled = False, log_enabled = False):
     self._data = data
     self._bt_enabled = bt_enabled
     self._log_enabled = log_enabled
     self.rewind()
+    self._user_context = Context(context)
 
   @property
   def data(self):
@@ -203,6 +261,10 @@ class Stream():
   def pos(self, val):
     self._pos = val
 
+  @property
+  def context(self):
+    return self._user_context
+
   def rewind(self):
     self._pos = 0
     self._log = []
@@ -210,6 +272,7 @@ class Stream():
     self._stack_idx = 0
 
   def push(self, parser):
+    self._user_context.push()
     if self._log_enabled:
       self._log.append((self._stack_idx,self.pos, parser))
     if self._bt_enabled:
@@ -219,12 +282,14 @@ class Stream():
       self._stack_idx += 1
 
   def pop(self):
+    self._user_context.pop()
     if self._bt_enabled:
       self._stack_idx -= 1
       assert self._stack_idx >= 0, "Error stream push()/pop() mismatch!"
       self.pos, _p = self._stack[self._stack_idx]
 
   def advance(self):
+    self._user_context.pop()
     if self._bt_enabled:
       # just cut stack, position is kept
       self._stack = self._stack[0:self._stack_idx]
@@ -235,6 +300,7 @@ class Stream():
       return "Stream log is disabled."
     total_width = 120
     depth_width = 5
+    ncall_width = 5
     name_width = max([len("parser")] + [len(pars.name) for d,pos,pars in self._log]) + 1
     loc_width = max([len("defined at")] + [len(pars.loc) for d,pos,pars in self._log]) + 1
     if name_width > 30:
@@ -242,25 +308,29 @@ class Stream():
     if loc_width > 20:
       loc_width = 20
 
-    log_input_width = total_width - depth_width - name_width - loc_width - 7
+    log_input_width = total_width - depth_width - ncall_width - name_width - loc_width - 7
 
-    def log_line(depth, pos, name, loc):
+    def log_line(depth, pos, name, loc, ncall):
       l = _line_with_pos(self.data, pos, log_input_width-3, 5)
       name = _shorten_str(repr(name)[1:-1], name_width)
       loc = _shorten_str(loc, loc_width, 0)
-      return f"{depth:<{depth_width}} │ {name:<{name_width}} │ {loc:<{loc_width}} │ {l}"
+      return f"{depth:<{depth_width}} │ {ncall:<{ncall_width}} │ {name:<{name_width}} │ {loc:<{loc_width}} │ {l}"
 
     s = _line_with_pos(self.data, self.pos, total_width-9, 10)
     text  = f"Parsing log\n"
-    text += f"{'━'*depth_width}━┯━{'━'*name_width}━┯━{'━'*loc_width}━┯{'━'*log_input_width}\n"
-    text += f"{'depth':<{depth_width}} │ {'parser':<{name_width}} │ {'defined at':<{loc_width}} │ parser input\n"
-    text += f"{'═'*depth_width}═╪═{'═'*name_width}═╪═{'═'*loc_width}═╪{'═'*log_input_width}"
+    text += f"{'━'*depth_width}━┯━{'━'*ncall_width}━┯━{'━'*name_width}━┯━{'━'*loc_width}━┯{'━'*log_input_width}\n"
+    text += f"{'depth':<{depth_width}} │ {'calls':<{ncall_width}} │ {'parser':<{name_width}} │ {'defined at':<{loc_width}} │ parser input\n"
+    text += f"{'═'*depth_width}═╪═{'═'*ncall_width}═╪═{'═'*name_width}═╪═{'═'*loc_width}═╪{'═'*log_input_width}"
+    calls = dict()
     for depth, pos, par in self._log:
-      text += "\n" + log_line(depth, pos, par.name, par.loc)
-    text +=  f"\n{'━'*depth_width}━┷━{'━'*name_width}━┷━{'━'*loc_width}━┷{'━'*log_input_width}\n"
+      ncall = calls.get(par, 1)
+      calls[par] = ncall + 1
+      text += "\n" + log_line(depth, pos, par.name, par.loc, ncall)
+    text +=  f"\n{'━'*depth_width}━┷━{'━'*ncall_width}━┷━{'━'*name_width}━┷━{'━'*loc_width}━┷{'━'*log_input_width}\n"
     return text
 
   def __repr__bt(self):
+    # TODO: add info from context
     if not self._bt_enabled:
       return "Stream backtrace is disabled.\n"
     # TODO configurable columns widths
@@ -289,6 +359,14 @@ class Stream():
       text += "\n" + bt_line(pos,par.name, par.loc)
     text +=  f"\n{'━'*name_width}━┷━{'━'*loc_width}━┷{'━'*bt_input_width}\n"
     return text
+
+  @property
+  def bt(self):
+    return self.__repr__bt()
+
+  @property
+  def log(self):
+    return self.__repr__log()
 
   def __repr__(self):
     bt = self.__repr__bt()
@@ -415,20 +493,21 @@ class Parser:
   def __call__dict(self, s):
     # parsing allow multiple items per key, i.e. it is actually bags
     result = Result()
+    result.value = {k:[] for k in self._parser}
     match = True
     while match:
       match = False
-      for k,p in self._parser.items():
+      for k, p in self._parser.items():
         r = p(s)
         if r:
           match = True
-          if not result:
-            result = r
-            result.value = {k:[] for k in self._parser}
-          result._token = Token(result.token.stream,
-                            self.name,
-                            result.token.start,
-                            r.token.end)
+          if result:
+            result._token = Token(result.token.stream,
+                              self.name,
+                              result.token.start,
+                              r.token.end)
+          else:
+            result._token = r._token
           if r.value is not None:
             result.value[k].append(r.value)
           break
@@ -511,6 +590,8 @@ class Parser:
     self._parser = Parser._possible_unwrap(self._parser)
     if type(self._parser) is list:
       r = self.__call__list(s)
+    elif type(self._parser) is dict:
+      r = self.__call__dict(s)
     elif type(self._parser) is tuple:
       r = self.__call__tuple(s)
     elif isinstance(self._parser, tuple) and '_fields' in dir(self._parser):
@@ -673,9 +754,15 @@ class Parser:
     p = Parser(m, name, loc)
     return p
 
-  def __eq__(self, val):
+  def __eq__(self, other):
+    return id(self) == id(other)
+
+  def __hash__(self):
+    return id(self)
+
+  def __irshift__(self, val):
     loc = Parser._get_loc()
-    name = f"(({self._name})=={val})"
+    name = f"(({self._name})>>={val})"
     def m(s):
       r = self(s)
       if r:
