@@ -1,1 +1,1 @@
-from .cp import *
+from .parsik import *
