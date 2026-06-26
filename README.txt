@@ -251,6 +251,7 @@ None ('~((term('1')&<lambda>@<stdin>:1))'@''@[0:0])
 >>> # be unwrapped every time on parsing
 
 >>> # recursion also works with namedtuples
+>>> bintree = namedtuple('bintree', ['left', 'right']])
 >>> bp=(intnum | in_brackets(Parser(bintree(left=lambda:bp, right=lambda:bp))))
 >>> bp("1")
 1 ('(intnum|'('bintree(left=<lambda>@<stdin>:1@<stdin>:1, right=<lambda>@<stdin>:1@<stdin>:1)')')'@'1'@[0:1])
@@ -370,6 +371,114 @@ parser                         │ defined at          │ parser input
 >>> # since optional parser always considered as succesful,
 >>> # but mat not do progress on input that may lead to
 >>> # infinite loops
+
+>>> # Context intro
+>>> # Context is organized like traditional programming languages env: toplevel and call stack
+>>> # context.top - global shared space
+>>> # context.local - curent frame of current parser
+>>> # context.upper - from nearest outer frame to top
+>>> # only top and current frame are mutable
+>>> # context is bound to stream
+>>> s = Stream("", debug=True, context={'top_var':123}) # optionally sets toplevel of the context
+>>> s.context.top
+{'top_var': 123}
+>>> s.context.upper
+<cp.cp.Context.lookup object at 0x7f21c949da90>
+>>> # Context is accesible in processing lambdas via optional last positional parameter or keyword with name 'context'
+>>> # name for context parameter is required to be 'context':
+>>> p = term("123") % (lambda v, context: context[v])
+>>> # context[v] - lookup from current local frame and up to the toplevel
+>>> # context[v]=55 - sets only in current local frame
+>>> # it is equiv context.local[v]=55
+
+>>> # context usage scenarios
+
+>>> # store some meta-data about parsing process:
+>>> @parser_gen
+... def countable(p):
+...     return (p % (lambda v, context: context.top.update({('count', p): 1 + context.top.get(('count', p), 0)}) or v))["$"+p.name]
+...
+>>> p = countable(term("a"))
+>>> r = (+p)("aaaabbbb")
+>>> r.token.stream.context.top
+{('count', term('a')@<python-input-16>:1): 4}
+>>> r.value
+['a', 'a', 'a', 'a']
+>>> # This way me may profile parsers, etc
+
+>>> # other scenario is to hijack some parsers
+>>> # for instance, we can redefince comments, whitespaces, etc
+>>> @parser_gen
+... def overload(p):
+...   def m(s):
+...     return s.context.get(p, p)(s)
+...   return Parser(m, "!"+p.name+"!")
+...
+>>> bro = term("(")
+>>> brc = term(")")
+>>> in_br = lambda p: overload(bro)>>p<<overload(brc)
+>>> p = in_br(term("123"))
+>>> p("(123)")
+'123'
+('(!term('(')!>>term('123'))<<!term(')')!)@<python-input-32>:'@'Token('(123)', ((!term('(')! .. n-input-32>:1, 0, 5))
+>>> # to generate new parser with (re)defined locals in its context frmae
+>>> # use ** operation: { ... } ** parser
+>>> p1 = {bro: term("["), brc: term("]")} ** p
+>>> p1("[123]")
+'123'
+('{term('(')@<python-input-30>:1: term('[')@<python-input-35>:1, term(')')@<python-input-31>:1: term(']')@<python-input-35>:1}**((!term('(')!>>term('123'))<<!term(')')!))@<python-input-35>:'@'Token('[123]', ({term('(')@< .. n-input-35>:1, 0, 5))
+>>> r = p1("[123]")
+>>> print(r.token.stream.log)
+Parsing log
+━━━━━━┯━━━━━━━┯━┯━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┯━━━━━━━━━━━━━━━━━━━━━━┯━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+depth │ calls │A│ parser                         │ defined at           │ parser input
+══════╪═══════╪═╪════════════════════════════════╪══════════════════════╪═══════════════════════════════════════════════════
+0     │ 1     │v│ ({term('(')@< .. !term(')')!)) │ <python-input-35>:1  │ 🢂◈[123]
+1     │ 1     │v│ ((!term('(')! .. <!term(')')!) │ <python-input-32>:1  │ 🢂◈[123]
+2     │ 1     │v│ (!term('(')!>>term('123'))     │ <python-input-32>:1  │ 🢂◈[123]
+3     │ 1     │v│ !term('(')!                    │ <python-input-32>:1  │ 🢂◈[123]
+4     │ 1     │v│ term('[')                      │ <python-input-35>:1  │ 🢂◈[123]
+5     │ 1     │>│ term('[')                      │ <python-input-35>:1  │ [🢂◈123]
+4     │ 1     │>│ !term('(')!                    │ <python-input-32>:1  │ [🢂◈123]
+3     │ 1     │v│ term('123')                    │ <python-input-33>:1  │ [🢂◈123]
+4     │ 1     │>│ term('123')                    │ <python-input-33>:1  │ [123🢂◈]
+3     │ 1     │>│ (!term('(')!>>term('123'))     │ <python-input-32>:1  │ [123🢂◈]
+2     │ 1     │v│ !term(')')!                    │ <python-input-32>:1  │ [123🢂◈]
+3     │ 1     │v│ term(']')                      │ <python-input-35>:1  │ [123🢂◈]
+4     │ 1     │>│ term(']')                      │ <python-input-35>:1  │ [123]🢂◈
+3     │ 1     │>│ !term(')')!                    │ <python-input-32>:1  │ [123]🢂◈
+2     │ 1     │>│ ((!term('(')! .. <!term(')')!) │ <python-input-32>:1  │ [123]🢂◈
+1     │ 1     │>│ ({term('(')@< .. !term(')')!)) │ <python-input-35>:1  │ [123]🢂◈
+━━━━━━┷━━━━━━━┷━┷━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┷━━━━━━━━━━━━━━━━━━━━━━┷━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+>>> # constant default value
+>>> p = term("123") / 42
+>>> p("123")
+'123'
+('(term('123'))/42)@<python-input-42>:'@'Token('123', ((term('123') .. n-input-42>:1, 0, 3))
+>>> p("321")
+42
+('(term('123'))/42)@<python-input-42>:'@'Token('321', ((term('123') .. n-input-42>:1, 0, 0))
+>>> # dynamic default value
+>>> p = term("123") / (lambda context: context.get(123, 42))
+>>> p("321")
+42
+('(term('123'))/<function <lambda> at 0x7f21c94cab60>)@<python-input-46>:'@'Token('321', ((term('123') .. n-input-46>:1, 0, 0))
+>>> ({123:55}**p)("321")
+55
+('{123: 55}**((term('123'))/<function <lambda> at 0x7f21c94cab60>))@<python-input-48>:'@'Token('321', ({123: 55}**( .. n-input-48>:1, 0, 0))
+
+>>> p = (term("123") >= 45)
+>>> p("123")
+45
+('(term('123'))>>=45)@<python-input-1>:'@'Token('123', ((term('123') .. on-input-1>:1, 0, 3))
+>>> p = (term("123") >= (lambda context: context.get('val', 45)))
+>>> p("123")
+45
+('(term('123'))>>=<function <lambda> at 0x7f46019d1a80>)@<python-input-3>:'@'Token('123', ((term('123') .. on-input-3>:1, 0, 3))
+>>> ({'val':321}**p)("123")
+321
+('{'val': 321}**((term('123'))>>=<function <lambda> at 0x7f46019d1a80>))@<python-input-5>:'@'Token('123', ({'val': 321} .. on-input-5>:1, 0, 3))
 
 
 

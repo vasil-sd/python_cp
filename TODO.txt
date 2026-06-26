@@ -1,0 +1,41 @@
+# TODO:
+#  6a. breakpoints on stream position ranges and selected parsers
+#      (with parametrizable invocation count)
+#      add to log counting of parsers invocation
+#      think about usage scenarios
+#  6b. limit parsers invocation count in stream object, to avoid
+#      infinite loops, for instance:
+#      +(~p) - may loop forever
+#      Parser({'a':~p}) - may loop forever
+#      p=Parser(lambda:~p)
+#      i.e. every parser that internally contains optional parser (or other
+#      parser that may return success w/o progress on input stream) may
+#      lead to infinite loops
+#      limit in stream object will work with standard parsers, but
+#      user defined parsers may in rare synthetic cases overcome this limit
+#
+#      possible solution: detect succesful parsing w/o stream pos movement in
+#      call_dict. __pos__, etc and return corresponding result
+#  8. tests!!!
+#  9. docs!!!
+#  10. refactoring:
+#      - Split Parser into several classes
+#      - better naming
+#      - readability!
+#      - move code for diagnostics message and formatting into separate functions
+#  11. generating printer combinators from parsers?
+#  12. an idea: Parser detects that __init__ takes parser as
+#      argument and after parsing input stream calls __init__ with corresponding
+#      parsing result:
+#      __init__(parser=Parser())
+
+  # TODO: function to get residual stream
+  # TODO: think about stream combinators
+  # TODO: add ability to put breakpoint on parser by log/bt
+  #       add line_no to printing log and bt and
+  #       .bp_log(line_no)
+  #       .bp_bt(line_no)
+  # TODO: bt and log include corresponding context info
+  # TODO: bt and log records are namedtuples
+
+TODO: overrided -> __pos__, __pos__ -> rep/rep1 ?
