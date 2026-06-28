@@ -1,3 +1,32 @@
+# About
+
+Parsik - is a simple single-file lib for parser combinators.
+
+Main aim: dirty and fast hacking on parsers prototyping (REPL friendly)
+for various PoC python code.
+
+Parsik is considered to be used without juggling with dependencies, just
+put one `parsik.py` file in your source tree.
+
+Speed, memory efficiency, etc are not in the focus of this project.
+
+But parsers debugging is.
+
+So, here you'll find backtrace of parsers application (with positions in input stream),
+full log of parsers invocations, log of context access, etc.
+
+Breakpoints, watchpoints are on the way.
+
+Also, locations of parser definitions in the source code are recorded.
+
+So, you'll have a lot of tools and information to analyze and debug your
+parsers (directly in the REPL).
+
+Consider of using more mature industry parser generators, like Lark,
+Pegen, tree-sitter, etc when your project grows from PoC to MVP.
+
+# Usage examples
+
 $ python3
 Python 3.12.3 (main, Mar 23 2026, 19:04:32) [GCC 13.3.0] on linux
 Type "help", "copyright", "credits" or "license" for more information.
