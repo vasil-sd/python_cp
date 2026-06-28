@@ -2,6 +2,14 @@ from collections import namedtuple
 import inspect
 import re
 
+import shutil
+terminal_columns = shutil.get_terminal_size((80,25)).columns
+
+# TODO: add to log and bt - parameter slice from:to
+# TODO: single numeration of items in bt, log and context log
+# TODO: better naming for lambdas in parser names
+# TODO: breakpoints to Stream, watchpoints to Context
+
 def unwrap_with_context_if_needed(val, context, *args, **kwargs):
   # unwraps with context only user defined functions and lambdas
   if type(val).__name__ == 'function':
@@ -16,7 +24,7 @@ def unwrap_with_context_if_needed(val, context, *args, **kwargs):
     return val(*args, **kwargs)
   return val
 
-class FormatStr:
+class Format:
   @staticmethod
   def Shorten(s, w, ratio=0.5):
     if len(s) > w:
@@ -67,6 +75,62 @@ class FormatStr:
     ns = f"{past_r}{'🢂◈' if zero_pos >=0 else ''}{future_r}"
     return ns
 
+  @staticmethod
+  def Table(hdr, data, start = None, end = None, total_width=terminal_columns-4):
+    # hdr = [(name, ratio for max width/zero - rest, shortener fn), ...]
+    # todo: ratio < 0 - is fixed width
+    # data = tuples of strings/lambda(width) closure
+    # . XXX | XXX | XXXX .
+    sum_width = total_width - 3*(len(hdr)-1) - 2
+    lens = tuple(len(elt[0]) for elt in hdr)
+    def get_len(item):
+      if isinstance(item, str):
+        return len(item)
+      return sum_width
+    [lens := tuple(max(get_len(row[i]), lens[i]) for i in range(len(lens))) for row in data]
+    lens = tuple(min(lens[i], int(hdr[i][1] * sum_width)) for i in range(len(lens)))
+    if 0 in lens:
+      zeros = sum(l == 0 for l in lens)
+      zw = int(sum(lens) / zeros)
+      lens = tuple(l or zw for l in lens)
+    delta = sum(lens) - sum_width
+    max_idx = lens.index(max(lens))
+    lens = list(lens)
+    lens[max_idx] -= delta
+    lens = tuple(lens)
+    def get_str(shortener, data, width):
+      if isinstance(data, str):
+        return shortener(data, width)
+      return shortener(data(width), width)
+    data = [tuple(get_str(hdr[i][2], row[i], lens[i]) for i in range(len(lens))) for row in data]
+    lines = ["━"*(l+2) for l in lens]
+    top = "┯".join(lines)
+    sep = "╪".join(["═"*(l+2) for l in lens])
+    bot = "┷".join(lines)
+    dashed = "│".join([f"{'*'*min(3, l):^{l+2}}" for l in lens])
+    def line(vals):
+      fields = (f" {hdr[i][2](vals[i], lens[i]):<{lens[i]}} " for i in range(len(lens)))
+      return "│".join(fields)
+    text  = top
+    text += "\n" + "│".join([f" {hdr[i][0]:<{lens[i]}} " for i in range(len(lens))])
+    text += "\n" + sep
+    start = start or 0
+    end = end or len(data)
+    if start < 0:
+      start = len(data) + start
+    start = max(0, start)
+    if end < 0:
+      end = len(data) + start
+    end = max(0, end)
+    if start > 0 :
+      text += "\n" + dashed
+    for i in range(start, end):
+      text += "\n" + line(data[i])
+    if end < len(data):
+      text += "\n" + dashed
+    text += "\n" + bot
+    return text
+    
 class Token(namedtuple('Token', ['stream', 'parser', 'start', 'end'])):
   __slots__=()
   def set_parser(self, parser):
@@ -82,8 +146,8 @@ class Token(namedtuple('Token', ['stream', 'parser', 'start', 'end'])):
   def text(self):
     return repr(self.data)[1:-1]
   def __repr__(self):
-    line = FormatStr.Part(self.stream.data, self.start, 20)
-    parser_name = FormatStr.Shorten(repr(self.parser), 30)
+    line = Format.Part(self.stream.data, self.start, 20)
+    parser_name = Format.Shorten(repr(self.parser), 30)
     return f"Token('{line}', {parser_name}, {self.start}, {self.end})"
   @staticmethod
   def default(stream, parser):
@@ -186,58 +250,119 @@ class ResultProcessor(list):
           v.invalidate(text)
     return v
 
-class Context():
-  def __init__(self, ctx = None):
+class LoggedDict:
+  def __init__(self, dict, log):
+    self._log = log
+    self._dict = dict
+
+  def get(self, idx, default = None):
+    v = self._dict.get(idx, self)
+    if v is self:
+      self._log(('get', idx, "N/A" if default is self else f"N/A ({default})",))
+      v = default
+    else:
+      self._log(('get', idx, v,))
+    return v
+
+  def __getitem__(self, idx):
+    v = self.get(idx, self)
+    if v is self:
+      raise KeyError(idx)
+    return v
+
+  def __setitem__(self, idx, val):
+    self._log(('set', idx, val,))
+    self._dict.__setitem__(idx, val)
+
+  def __delitem__(self, idx):
+    self._log(('del', idx, None,))
+    self._dict.__delitem__(idx)
+      
+class Context:
+  class watchpoint:
+    pass
+
+  def __init__(self, ctx = None, debug = False):
     self._top = ctx or dict()
     self._stack = []
+    self._log = []
+    self._debug = debug
 
   def clear(self):
-    self._stack = []
+    self._stack.clear()
+    self._log.clear()
 
-  def push(self):
-    self._stack.append(dict())
+  def push(self, parser):
+    self._stack.append([parser, dict()])
 
   def pop(self):
     self._stack.pop()
 
+  def _logger(self, tag):
+    def log_fn(data):
+      data = (self.current_parser, tag) + data
+      self._log.append(data)
+    return log_fn
+
+  @property
+  def current_parser(self):
+    if len(self._stack) > 0:
+      return self._stack[-1][0]
+    return None
+     
   @property
   def top(self):
+    if self._debug:
+      return LoggedDict(self._top, self._logger('top'))
     return self._top
 
   class lookup:
     def __init__(self, ctx):
       self.__ctx = ctx
 
-    not_found = object()
-
     def get(self, idx, default=None):
       if len(self.__ctx._stack) > 0:
         for i in range(len(self.__ctx._stack)-2, -1, -1):
-          if idx in self.__ctx._stack[i]:
-            return self.__ctx._stack[i][idx]
+          if idx in self.__ctx._stack[i][1]:
+            return self.__ctx._stack[i][1][idx]
       return self.__ctx._top.get(idx, default)
-
+    
     def __getitem__(self, idx):
-      val = self.get(idx, Context.lookup.not_found)
-      if val == Context.lookup.not_found:
+      v = self.get(idx, self)
+      if v is self:
         raise KeyError(idx)
-      return val
+      return v
 
+  @property
+  def _upper(self):
+    return Context.lookup(self)
+  
   @property
   def upper(self):
-    return Context.lookup(self)
+    if self._debug:
+      return LoggedDict(self._upper, self._logger('upper'))
+    return self._upper
 
   @property
+  def _local(self):
+    return self._stack[-1][1] if len(self._stack) > 0 else None
+    
+  @property
   def local(self):
-    return self._stack[-1] if len(self._stack) > 0 else None
+    l = self._local
+    if l is None:
+      return None
+    if self._debug:
+      return LoggedDict(l, self._logger('local'))
+    return l
 
   def __getitem__(self, key):
-    if self.local and key in self.local:
+    if self._local and key in self._local:
       return self.local[key]
     return self.upper[key]
 
   def get(self, key, default=None):
-    if self.local and key in self.local:
+    if self._local and key in self._local:
       return self.local[key]
     return self.upper.get(key, default)
 
@@ -247,13 +372,41 @@ class Context():
   def __delitem__(self, key):
     del self.local[key]
 
-  #def __repr__(self):
-    # TODO
-    #pass
+  def frame(self, n=-1):
+    if n < len(self._stack):
+      return self._stack[n]
+    return None
 
-class Breakpoint():
-  pass
-  # __init__(self, stream)
+  def log(self, start=None, end=None):
+    if not self._debug:
+      return "Context log is disabled."
+    data = [ (str(n+1),
+              repr(pars.name)[1:-1],
+              pars.loc,
+              tag,
+              op,
+              repr(key),
+              repr(val))
+             for n, (pars, tag, op, key, val) in enumerate(self._log)]
+    shorten_mid = lambda v, w: Format.Shorten(v, w)
+    shorten_left = lambda v, w: Format.Shorten(v,w,0)
+    iden = lambda v, w: v
+    hdr = (('N', 0.1, iden),
+           ('parser', 0.3, shorten_mid),
+           ('defined at', 0.2 , shorten_left),
+           ('scope', 0.1, iden),
+           ('OP',0.1, iden),
+           ('key',0, shorten_mid),
+           ('value',0, shorten_mid))
+    return "Stream context log\n" + Format.Table(hdr, data, start, end)
+    
+  def __repr__(self):
+    return self.log()
+
+class Stream():
+  class Breakpoint:
+    pass
+  # def __init__(self, stream):
   # add(self, parser, count=None, pos=None)
   # remove(self, bp_no)
   # __repr__
@@ -264,11 +417,10 @@ class Breakpoint():
   #    current context 
   #    etc
 
-class Stream():
   def __init__(self, data, context = None, debug = False):
     self._data = data
     self._debug = debug
-    self._context = Context(context)
+    self._context = Context(context, debug)
     self.rewind()
 
   @property
@@ -295,7 +447,7 @@ class Stream():
     self._context.clear()
 
   def push(self, parser):
-    self._context.push()
+    self._context.push(parser)
     if self._debug:
       self._log.append((self._stack_idx,self.pos, parser, 'v',))
       if self._stack_idx >= len(self._stack):
@@ -317,89 +469,70 @@ class Stream():
     if self._debug:
       # just cut stack, position is kept
       _pos, parser = self._stack[self._stack_idx-1]
-      self._log.append((self._stack_idx, self.pos, parser, '>',))
       self._stack = self._stack[0:self._stack_idx]
       self._stack_idx -= 1
+      self._log.append((self._stack_idx, self.pos, parser, '>',))
 
-  def __repr__log(self):
+  def log(self, start=None, end=None):
     if not self._debug:
       return "Stream debug is disabled."
-    total_width = 120
-    depth_width = 5
-    ncall_width = 5
-    name_width = max([len("parser")] + [len(pars.name) for d,pos,pars,s in self._log]) + 1
-    loc_width = max([len("defined at")] + [len(pars.loc) for d,pos,pars,s in self._log]) + 1
-    if name_width > 30:
-      name_width = 30
-    if loc_width > 20:
-      loc_width = 20
-
-    log_input_width = total_width - depth_width - ncall_width - name_width - loc_width - 9
-
-    def log_line(depth, pos, name, loc, ncall, action):
-      l = FormatStr.Part(self.data, pos, log_input_width-3, 5)
-      name = FormatStr.Shorten(repr(name)[1:-1], name_width)
-      loc = FormatStr.Shorten(loc, loc_width, 0)
-      return f"{depth:<{depth_width}} │ {ncall:<{ncall_width}} │{action}│ {name:<{name_width}} │ {loc:<{loc_width}} │ {l}"
-
-    s = FormatStr.Part(self.data, self.pos, total_width-9, 10)
-    text  = f"Parsing log\n"
-    text += f"{'━'*depth_width}━┯━{'━'*ncall_width}━┯━┯━{'━'*name_width}━┯━{'━'*loc_width}━┯{'━'*log_input_width}\n"
-    text += f"{'depth':<{depth_width}} │ {'calls':<{ncall_width}} │A│ {'parser':<{name_width}} │ {'defined at':<{loc_width}} │ parser input\n"
-    text += f"{'═'*depth_width}═╪═{'═'*ncall_width}═╪═╪═{'═'*name_width}═╪═{'═'*loc_width}═╪{'═'*log_input_width}"
     calls = dict()
-    for depth, pos, par, action in self._log:
-      ncall = calls.get(par, 0)
+    def get_calls(parser, action):
+      n = calls.get(parser, 0)
       if action == 'v':
-        ncall += 1
-      calls[par] = ncall
-      text += "\n" + log_line(depth, pos, par.name, par.loc, ncall, action)
-    text +=  f"\n{'━'*depth_width}━┷━{'━'*ncall_width}━┷━┷━{'━'*name_width}━┷━{'━'*loc_width}━┷{'━'*log_input_width}\n"
-    return text
+        n += 1
+      calls[parser] = n
+      return n 
+    data = [ (str(depth),
+              str(get_calls(pars, action)),
+              action,
+              repr(pars.name)[1:-1],
+              pars.loc,
+              (lambda pos: lambda w: Format.Part(self.data, pos, w, 5))(pos))
+             for depth, pos, pars, action in self._log]
+    shorten_mid = lambda v, w: Format.Shorten(v, w)
+    shorten_left = lambda v, w: Format.Shorten(v,w,0)
+    iden = lambda v, w: v
+    hdr = (('depth', 0.1, iden),
+           ('calls', 0.1, iden),
+           ('action', 0.1, iden),
+           ('parser', 0.3, shorten_mid),
+           ('defined at', 0.2 , shorten_left),
+           ('parser input', 0, iden))
+    return "Parsing log\n" + Format.Table(hdr, data, start, end)
 
-  def __repr__bt(self):
-    # TODO: add info from context
+  def backtrace(self, start=None, end=None):
+    # TODO: add info from context, link context log, bt, and log via single numeration
     if not self._debug:
       return "Stream debug is disabled.\n"
-    # TODO configurable columns widths
-    total_width = 120
-    name_width = max([len("parser")] + [len(pars.name) for pos,pars in self._stack]) + 1
-    loc_width = max([len("defined at")] + [len(pars.loc) for pos,pars in self._stack]) + 1
-    if name_width > 30:
-      name_width = 30
-    if loc_width > 20:
-      loc_width = 20
-
-    bt_input_width = total_width - name_width - loc_width - 4
-
-    def bt_line(pos, name, loc):
-      l = FormatStr.Part(self.data, pos, bt_input_width-3, 5)
-      name = FormatStr.Shorten(repr(name)[1:-1], name_width)
-      loc = FormatStr.Shorten(loc, loc_width, 0)
-      return f"{name:<{name_width}} │ {loc:<{loc_width}} │ {l}"
-
-    s = FormatStr.Part(self.data, self.pos, total_width-9, 10)
-    text =  f"Parsing backtrase\n{'━'*total_width}\n"
-    text += f"input ⮞ {s}\n{'━'*name_width}━┯━{'━'*loc_width}━┯{'━'*bt_input_width}\n"
-    text += f"{'parser':<{name_width}} │ {'defined at':<{loc_width}} │ parser input\n"
-    text += f"{'═'*name_width}═╪═{'═'*loc_width}═╪{'═'*bt_input_width}"
-    for pos, par in self._stack:
-      text += "\n" + bt_line(pos,par.name, par.loc)
-    text +=  f"\n{'━'*name_width}━┷━{'━'*loc_width}━┷{'━'*bt_input_width}\n"
-    return text
+    s = Format.Part(self.data, self.pos, terminal_columns-9, 10)
+    text =  f"Parsing backtrace\n{'━'*(terminal_columns-4)}\n"
+    text += f"input ⮞ {s}\n"
+    data = [ (repr(pars.name)[1:-1],
+              pars.loc,
+              (lambda pos: lambda w: Format.Part(self.data, pos, w, 5))(pos))
+             for pos, pars in self._stack]
+    shorten_mid = lambda v, w: Format.Shorten(v, w)
+    shorten_left = lambda v, w: Format.Shorten(v,w,0)
+    iden = lambda v, w: v
+    hdr = (('parser', 0.3, shorten_mid),
+           ('defined at', 0.2 , shorten_left),
+           ('parser input', 0, iden))
+    return text + Format.Table(hdr, data, start, end)
 
   @property
   def bt(self):
-    return self.__repr__bt()
+    print(self.backtrace())
 
   @property
-  def log(self):
-    return self.__repr__log()
+  def lg(self):
+    print(self.log())
 
   def __repr__(self):
-    bt = self.__repr__bt()
-    log = self.__repr__log()
-    return f"{bt}\n{log}\n"
+    bt = self.backtrace()
+    log = self.log()
+    ctx_log = repr(self._context)
+    return f"{bt}\n{log}\n{ctx_log}\n"
 
 class Parser:
   @staticmethod
@@ -882,7 +1015,8 @@ class Parser:
     overrides = {k: Parser._to_parser(v, loc) if isinstance(k, Parser) else v for k,v in other.items()}
     name = f"({overrides}**{self.name})"
     def m(s):
-      s.context.local.update(overrides)
+      for k,v in overrides.items():
+        s.context.local[k]=v
       return self(s)
     return Parser(m, name, loc)
 
