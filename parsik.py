@@ -72,7 +72,7 @@ class Format:
       past_r = "..." + past_r[pd + 3:]
     if end < len(s) or fd > 0:
       future_r = future_r[:-fd-3] + "..."
-    ns = f"{past_r}{'🢂◈' if zero_pos >=0 else ''}{future_r}"
+    ns = f"{past_r}{'⮞' if zero_pos >=0 else ''}{future_r}"
     return ns
 
   @staticmethod
@@ -91,7 +91,7 @@ class Format:
     lens = tuple(min(lens[i], int(hdr[i][1] * sum_width)) for i in range(len(lens)))
     if 0 in lens:
       zeros = sum(l == 0 for l in lens)
-      zw = int(sum(lens) / zeros)
+      zw = int((sum_width - sum(lens)) / zeros)
       lens = tuple(l or zw for l in lens)
     delta = sum(lens) - sum_width
     max_idx = lens.index(max(lens))
@@ -120,8 +120,8 @@ class Format:
       start = len(data) + start
     start = max(0, start)
     if end < 0:
-      end = len(data) + start
-    end = max(0, end)
+      end = len(data) + end
+    end = min(len(data), end)
     if start > 0 :
       text += "\n" + dashed
     for i in range(start, end):
@@ -278,13 +278,62 @@ class LoggedDict:
     self._log(('del', idx, None,))
     self._dict.__delitem__(idx)
       
+  def listing(self):
+    shorten_mid = lambda v, w: Format.Shorten(v, w)
+    hdr = (('key',0,shorten_mid),
+           ('value',0,shorten_mid))
+    data = [ (repr(key), repr(val)) for key, val in self._dict.items() ]
+    return Format.Table(hdr, data)
+
+  def __repr__(self):
+    return self.listing()
+
+class MemoStack:
+  def __init__(self):
+    self._stack = []
+    self._stack_idx = 0
+  def push(self, item):
+    if self._stack_idx >= len(self._stack):
+      self._stack.append(item)
+    else:
+      self._stack[self._stack_idx] = item
+    self._stack_idx += 1
+  def pop(self):
+    self._stack_idx -= 1
+    assert self._stack_idx >= 0, "Error  push()/pop() mismatch!"
+    return self._stack[self._stack_idx]
+  def pop_and_cut(self):
+    self._stack_idx -= 1
+    item = self._stack[self._stack_idx]
+    self._stack = self._stack[0:self._stack_idx]
+    return item
+  @property
+  def sp(self):
+    return self._stack_idx
+  def clear(self):
+    self._stack = []
+    self._stack_idx = 0
+  def __getitem__(self, idx):
+    return self._stack[idx]
+  def __setitem__(self, idx, val):
+    self._stack[idx] = val
+  @property
+  def valid_range(self):
+    return range(0,self.sp)
+  @property
+  def all_range(self):
+    return range(0, len(self._stack))
+
 class Context:
-  class watchpoint:
+  class Watchpoint:
+    # on_change: parser, scope, frameN,key, old_value, new_value
+    # on_read: parser, scope, frameN, key, value
+    # on_key_missed: parser, scope, key 
     pass
 
   def __init__(self, ctx = None, debug = False):
     self._top = ctx or dict()
-    self._stack = []
+    self._stack = MemoStack()
     self._log = []
     self._debug = debug
 
@@ -293,21 +342,42 @@ class Context:
     self._log.clear()
 
   def push(self, parser):
-    self._stack.append([parser, dict()])
+    self._stack.push([parser, dict()])
 
   def pop(self):
     self._stack.pop()
+  
+  def advance(self):
+    self._stack.pop_and_cut()
 
   def _logger(self, tag):
     def log_fn(data):
-      data = (self.current_parser, tag) + data
+      data = (self.parser(), tag) + data
       self._log.append(data)
     return log_fn
+    
+  def _frame(self, n=-1):
+    if n < 0:
+      n += self._stack.sp
+    if 0 <= n < self._stack.sp:
+      return self._stack[n][1]
+    return None
 
-  @property
-  def current_parser(self):
-    if len(self._stack) > 0:
-      return self._stack[-1][0]
+  def frame(self, n=-1):
+    frame = self._frame(n)
+    if frame is None:
+      return None
+    if self._debug:
+      if n < 0:
+        n += self._stack.sp
+      return LoggedDict(frame, self._logger(f"frame({n})"))
+    return frame
+    
+  def parser(self, n=-1):
+    if n < 0:
+      n += self._stack.sp
+    if 0 <= n < self._stack.sp:
+      return self._stack[n][0]
     return None
      
   @property
@@ -321,10 +391,10 @@ class Context:
       self.__ctx = ctx
 
     def get(self, idx, default=None):
-      if len(self.__ctx._stack) > 0:
-        for i in range(len(self.__ctx._stack)-2, -1, -1):
-          if idx in self.__ctx._stack[i][1]:
-            return self.__ctx._stack[i][1][idx]
+      if self.__ctx._stack.sp > 0:
+        for i in range(self.__ctx._stack.sp-2, -1, -1):
+          if idx in self.__ctx._frame(i):
+            return self.__ctx._frame(i)[idx]
       return self.__ctx._top.get(idx, default)
     
     def __getitem__(self, idx):
@@ -342,14 +412,10 @@ class Context:
     if self._debug:
       return LoggedDict(self._upper, self._logger('upper'))
     return self._upper
-
-  @property
-  def _local(self):
-    return self._stack[-1][1] if len(self._stack) > 0 else None
-    
+   
   @property
   def local(self):
-    l = self._local
+    l = self._frame()
     if l is None:
       return None
     if self._debug:
@@ -357,13 +423,15 @@ class Context:
     return l
 
   def __getitem__(self, key):
-    if self._local and key in self._local:
-      return self.local[key]
+    local = self._frame()
+    if local and key in local:
+      return local[key]
     return self.upper[key]
 
   def get(self, key, default=None):
-    if self._local and key in self._local:
-      return self.local[key]
+    local = self._frame()
+    if local and key in local:
+      return local[key]
     return self.upper.get(key, default)
 
   def __setitem__(self, key, val):
@@ -371,11 +439,6 @@ class Context:
 
   def __delitem__(self, key):
     del self.local[key]
-
-  def frame(self, n=-1):
-    if n < len(self._stack):
-      return self._stack[n]
-    return None
 
   def log(self, start=None, end=None):
     if not self._debug:
@@ -400,27 +463,140 @@ class Context:
            ('value',0, shorten_mid))
     return "Stream context log\n" + Format.Table(hdr, data, start, end)
     
+  def listing(self, start=None, end=None):
+    data = [ ((">" if n == self._stack.sp-1 else "") + str(n+1),
+              repr(pars.name)[1:-1],
+              pars.loc,
+              repr(dict))
+             for n, (pars, dict) in enumerate(self._stack._stack)]
+    shorten_mid = lambda v, w: Format.Shorten(v, w)
+    shorten_left = lambda v, w: Format.Shorten(v,w,0)
+    iden = lambda v, w: v
+    hdr = (('N', 0.1, iden),
+           ('parser', 0.3, shorten_mid),
+           ('defined at', 0.2 , shorten_left),
+           ('frame', 0, iden))
+    top = f"Toplevel : {shorten_mid(repr(self._top), terminal_columns-4)}\n"
+    return "Stream context frames\n" + top + Format.Table(hdr, data, start, end)
+
   def __repr__(self):
-    return self.log()
+    return self.log() + "\n" + self.listing()
 
-class Stream():
-  class Breakpoint:
-    pass
-  # def __init__(self, stream):
-  # add(self, parser, count=None, pos=None)
-  # remove(self, bp_no)
-  # __repr__
-  # check(self, parser)
-  #  breakpoint reached:
-  #    parser info
-  #    stream backtrace
-  #    current context 
-  #    etc
+class Breakpoints:
+  def __init__(self, stream):
+    self._stream = stream
+    self._bp = []
 
+  def add(self, parser=None, invocations=None, pos=None):
+    if pos is None:
+      pos = self._stream.pos
+    if type(pos) is int:
+      pos = slice(pos,len(self._stream.data)) # or pos + 1?
+    self._bp.append([parser, 0, invocations, pos])
+
+  def __call__(self, parser, invocations = None, pos=None):
+    self.add(parser, invocations, pos)
+    
+  class _adder_remover:
+    def __init__(self, parent, idx):
+      self._parent = parent
+      self._idx = idx
+    def __call__(self, parser = None, invocations = 1):
+      if parser is None:
+        self._parent.add(None, None, self._idx)
+      assert type(invocations) is int
+      self._parent.add(parser, invocations, self._idx)
+    def __delitem__(self):
+      self._parent.rm_pos(self._idx)
+
+  def __getitem__(self, idx):
+    return Breakpoints._adder_remover(self, idx)
+      
+  def __delitem__(self, idx):
+    self.rm_pos(idx)
+
+  def rm(self, n):
+    del self._bp[n-1]
+
+  def rm_pos(self, idx):
+    removed = True
+    if type(idx) is int:
+      idx = slice(idx,len(self._stream.data))
+    while removed:
+      removed = False
+      for i in range(len(self._bp)):
+        pos = self._bp[i][3]
+        if pos.start >= idx.start and pos.stop <= idx.stop:
+          del self._bp[i]
+          break
+
+  def reset(self):
+    for i in range(len(self._bp)):
+      self._bp[i][1] = 0
+
+  def clear(self):
+    self._bp.clear()
+
+  def check(self, parser):
+    for i in range(len(self._bp)):
+      pars, cntr, invoc, pos = self._bp[i]
+      if parser == pars:
+        cntr += 1
+        self._bp[i][1] = cntr
+        if cntr >= invoc and pos.start <= self._stream.pos < pos.stop:
+          self._bp[i][1] = 0
+          return i
+    for i in range(len(self._bp)):
+      pars, cntr, invoc, pos = self._bp[i]
+      if pars is None and pos.start <= self._stream.pos < pos.stop:
+        return i
+    return None
+
+  def from_log(self, n):
+    n-=1
+    assert 0 <= n < len(self._stream._log)
+    depth, pos, pars, action = self._stream._log[n]
+    self.add(pars, 1, pos)
+    
+  def from_bt(self, n):
+    n-=1
+    assert 0 <= n < len(self._stream._bt)
+    pos, pars = self._stream._bt[n]
+    self.add(pars, 1, pos)
+      
+  def listing(self, start=None, end=None, bp_hit=-1):
+    shorten_mid = lambda v, w: Format.Shorten(v, w)
+    shorten_left = lambda v, w: Format.Shorten(v,w,0)
+    iden = lambda v, w: v
+    hdr = (('N', 0.1, iden),
+           ('parser', 0.3, shorten_mid),
+           ('defined at', 0.2 , shorten_left),
+           ('calls', 0.1, iden),
+           ('pos', 0.1, iden),
+           ('triggers at input', 0, shorten_mid))
+    data = [ ((">" if n == bp_hit else "") + str(n+1),
+              repr(pars.name)[1:-1] if pars is not None else "---",
+              pars.loc if pars is not None else "---",
+              (f"{cntr} < {max_cntr}" if cntr < max_cntr else
+              f"{cntr} == {max_cntr}" if cntr == max_cntr else
+              f"{cntr} > {max_cntr}") if type(cntr) is int and type(max_cntr) is int
+              else "---",
+              f"[{pos.start}:{pos.stop}]",
+              (lambda pos: \
+               lambda w: Format.Part(self._stream.data, pos.start, pos.stop - pos.start))(pos))
+             for n,(pars, cntr, max_cntr, pos) in enumerate(self._bp)]
+    return "Breakpoints\n" + Format.Table(hdr, data, start, end)
+
+  def __repr__(self):
+    return self.listing()
+    
+class Stream():      
   def __init__(self, data, context = None, debug = False):
     self._data = data
     self._debug = debug
+    self._stack = MemoStack()
     self._context = Context(context, debug)
+    self._bp = Breakpoints(self)
     self.rewind()
 
   @property
@@ -439,39 +615,58 @@ class Stream():
   def context(self):
     return self._context
 
+  @property
+  def bp(self):
+    return self._bp
+  
+  @property
+  def rest(self):
+    return Format.Part(self.data, self.pos, terminal_columns, 10)
+
   def rewind(self):
     self._pos = 0
     self._log = []
-    self._stack = []
-    self._stack_idx = 0
-    self._context.clear()
+    self._stack.clear()
+    self.context.clear()
+    self.bp.reset()
 
   def push(self, parser):
     self._context.push(parser)
     if self._debug:
-      self._log.append((self._stack_idx,self.pos, parser, 'v',))
-      if self._stack_idx >= len(self._stack):
-        self._stack.append((self.pos, parser,))
-      else:
-        self._stack[self._stack_idx] = (self.pos, parser,)
-      self._stack_idx += 1
+      self._log.append((self._stack.sp,self.pos, parser, 'v',))
+      self._stack.push((self.pos, parser,))
+      bp_hit = self._bp.check(parser)
+      if bp_hit is not None:
+        text = f"Breakpoint {bp_hit + 1} is hit\n"
+        text += self.backtrace(start=-5) + "\n"
+        text += self.log(start=-5) + "\n"
+        text += self.context.listing(start=-5) + "\n"
+        text += self.context.log(start=-5) + "\n"
+        text += self.bp.listing(start=min(0, bp_hit-2), end=bp_hit+2, bp_hit=bp_hit) + "\n"
+        text += "\npredefined objects:"
+        text += f"\nparser - {parser}"
+        text += f"\nstream - {Format.Part(self.data, self.pos, 20, 5)}"
+        text += f"\nctx    - context"
+        text += f"\nbp     - breakpoints"
+        text += "\nYou are droppend in PDB now\n"
+        print(text)
+        stream = self
+        ctx = stream.context
+        bp = stream.bp
+        breakpoint()
 
   def pop(self):
     self._context.pop()
     if self._debug:
-      self._stack_idx -= 1
-      assert self._stack_idx >= 0, "Error stream push()/pop() mismatch!"
-      self.pos, parser = self._stack[self._stack_idx]
-      self._log.append((self._stack_idx,self.pos, parser, '^',))
+      self.pos, parser = self._stack.pop()
+      self._log.append((self._stack.sp,self.pos, parser, '^',))
 
   def advance(self):
-    self._context.pop()
+    self._context.advance()
     if self._debug:
       # just cut stack, position is kept
-      _pos, parser = self._stack[self._stack_idx-1]
-      self._stack = self._stack[0:self._stack_idx]
-      self._stack_idx -= 1
-      self._log.append((self._stack_idx, self.pos, parser, '>',))
+      _pos, parser = self._stack.pop_and_cut()
+      self._log.append((self._stack.sp, self.pos, parser, '>',))
 
   def log(self, start=None, end=None):
     if not self._debug:
@@ -483,17 +678,19 @@ class Stream():
         n += 1
       calls[parser] = n
       return n 
-    data = [ (str(depth),
+    data = [ (str(n+1),
+              str(depth),
               str(get_calls(pars, action)),
               action,
               repr(pars.name)[1:-1],
               pars.loc,
               (lambda pos: lambda w: Format.Part(self.data, pos, w, 5))(pos))
-             for depth, pos, pars, action in self._log]
+             for n, (depth, pos, pars, action) in enumerate(self._log)]
     shorten_mid = lambda v, w: Format.Shorten(v, w)
     shorten_left = lambda v, w: Format.Shorten(v,w,0)
     iden = lambda v, w: v
-    hdr = (('depth', 0.1, iden),
+    hdr = (('N', 0.1, iden),
+           ('depth', 0.1, iden),
            ('calls', 0.1, iden),
            ('action', 0.1, iden),
            ('parser', 0.3, shorten_mid),
@@ -507,15 +704,17 @@ class Stream():
       return "Stream debug is disabled.\n"
     s = Format.Part(self.data, self.pos, terminal_columns-9, 10)
     text =  f"Parsing backtrace\n{'━'*(terminal_columns-4)}\n"
-    text += f"input ⮞ {s}\n"
-    data = [ (repr(pars.name)[1:-1],
+    text += f"input: {s}\n"
+    data = [ ((">" if n == self._stack.sp-1 else "") + str(n+1),
+              repr(pars.name)[1:-1],
               pars.loc,
               (lambda pos: lambda w: Format.Part(self.data, pos, w, 5))(pos))
-             for pos, pars in self._stack]
+             for n, (pos, pars) in enumerate(self._stack._stack)]
     shorten_mid = lambda v, w: Format.Shorten(v, w)
     shorten_left = lambda v, w: Format.Shorten(v,w,0)
     iden = lambda v, w: v
-    hdr = (('parser', 0.3, shorten_mid),
+    hdr = (('N', 0.1, iden),
+           ('parser', 0.3, shorten_mid),
            ('defined at', 0.2 , shorten_left),
            ('parser input', 0, iden))
     return text + Format.Table(hdr, data, start, end)
@@ -531,8 +730,9 @@ class Stream():
   def __repr__(self):
     bt = self.backtrace()
     log = self.log()
-    ctx_log = repr(self._context)
-    return f"{bt}\n{log}\n{ctx_log}\n"
+    ctx_log = repr(self.context)
+    bp = repr(self.bp)
+    return f"{bt}\n{log}\n{ctx_log}\n{self.bp}\n"
 
 class Parser:
   @staticmethod
@@ -568,7 +768,7 @@ class Parser:
     fr, filename, line, fname, lines, pos = \
       inspect.getouterframes(inspect.currentframe())[frame]
     return f"{filename}:{line}"
-
+    
   def __init__(self, parser, name = None, loc = None):
     self.loc = loc if loc else Parser._get_loc()
     if isinstance(parser, Parser):
@@ -600,6 +800,12 @@ class Parser:
     self._name = name
     self._processor = ResultProcessor()
 
+  def replace(self, new_parser):
+    loc = Parser._get_loc()
+    parser = Parser._to_parser(new_parser, loc)
+    self.__init__(parser, loc=loc)
+    return self
+    
   @property
   def loc(self):
     return self._loc
